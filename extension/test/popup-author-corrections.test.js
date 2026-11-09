@@ -90,11 +90,14 @@ function jsonResponse(status, body) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-async function runPopupHarness(initialStorage = {}, initialCorrections = []) {
+async function runPopupHarness(initialStorage = {}, initialCorrections = [], initialRecentAuthors = null) {
   const { els } = buildDom();
   const storeData = Object.assign({}, initialStorage);
   const calls = [];
   const corrections = [...initialCorrections];
+  const recentAuthors = initialRecentAuthors !== null
+    ? [...initialRecentAuthors]
+    : (storeData.recentPostedAuthors ? [...storeData.recentPostedAuthors] : []);
 
   const fetchStub = async (url, opts) => {
     const u = String(url);
@@ -136,12 +139,19 @@ async function runPopupHarness(initialStorage = {}, initialCorrections = []) {
         return jsonResponse(200, { ok: true, deleted: idx >= 0, count: corrections.length });
       }
     }
+    if (u.endsWith('/recent-posted-authors')) {
+      return jsonResponse(200, { ok: true, authors: recentAuthors });
+    }
     return jsonResponse(404, { error: 'not-found' });
   };
 
   const doc = {
     getElementById: (id) => els[id] || null,
-    createElement: (tag) => makeEl('<' + tag + '>'),
+    createElement: (tag) => {
+      const el = makeEl('<' + tag + '>');
+      el.tagName = tag.toUpperCase();
+      return el;
+    },
     addEventListener: (ev, fn) => { doc['_on_' + ev] = fn; },
   };
 
@@ -169,7 +179,7 @@ async function runPopupHarness(initialStorage = {}, initialCorrections = []) {
   vm.runInContext(popupJs, sandbox);
 
   await doc._on_DOMContentLoaded();
-  return { els, store: storeData, calls, corrections };
+  return { els, store: storeData, calls, corrections, recentAuthors };
 }
 
 (async () => {
@@ -182,7 +192,7 @@ async function runPopupHarness(initialStorage = {}, initialCorrections = []) {
     check('corrSaveBtn exists', Boolean(els.corrSaveBtn));
     check('corrCancelBtn exists', Boolean(els.corrCancelBtn));
     check('correctionsCard exists', Boolean(els.correctionsCard));
-    check('corrCountBadge shows 0 saved initially', els.corrCountBadge.textContent.includes('0 saved'));
+    check('corrCountBadge shows 0 recent initially', els.corrCountBadge.textContent.includes('0 recent'));
   }
 
   console.log('\n2. Quick Correction Form Prefilling from latestTranslation');
@@ -243,46 +253,86 @@ async function runPopupHarness(initialStorage = {}, initialCorrections = []) {
     eq('storage latestTranslation updated', store.latestTranslation && store.latestTranslation.translatedAuthor, 'ایلکس فرگوسن درست');
 
     // Badge updated
-    check('Count badge updated to 1 saved', els.corrCountBadge.textContent.includes('1 saved'));
+    check('Count badge updated to 1 recent', els.corrCountBadge.textContent.includes('1 recent'));
     eq('corrections array has 1 item', corrections.length, 1);
   }
 
-  console.log('\n4. Corrections List Management (render, edit, delete)');
+  console.log('\n4. Saved author names NOT shown; only last 5 posted authors shown for correction');
   {
-    const existingCorrections = [
-      {
-        handle: '@imran_khan',
-        urduName: 'عمران خان',
-        originalName: 'Imran Khan',
-        updatedAt: Date.now(),
-      },
+    // Scenario A: 2 saved corrections in controller DB, but 0 posted tweets.
+    // Popup must show 0 items, not the saved database names!
+    const savedCorrections = [
+      { handle: '@saved_author_1', urduName: 'محفوظ مصنف ایک', originalName: 'Saved Author 1', updatedAt: Date.now() },
+      { handle: '@saved_author_2', urduName: 'محفوظ مصنف دو', originalName: 'Saved Author 2', updatedAt: Date.now() },
+    ];
+    const { els: elsA } = await runPopupHarness({}, savedCorrections, []);
+
+    check('Count badge shows 0 recent when no posts sent', elsA.corrCountBadge.textContent.includes('0 recent'));
+    check('Empty state visible when 0 posts sent', !elsA.correctionsEmpty.classList.contains('hidden'));
+    check('Saved authors are NOT rendered in popup list', !elsA.correctionsList.children || elsA.correctionsList.children.length === 0);
+
+    // Scenario B: 6 posts sent from different authors. Only the last 5 should appear.
+    const sixRecentAuthors = [
+      { handle: '@author6', author: 'Author Six', translatedAuthor: 'مصنف چھ' },
+      { handle: '@author5', author: 'Author Five', translatedAuthor: 'مصنف پانچ' },
+      { handle: '@author4', author: 'Author Four', translatedAuthor: 'مصنف چار' },
+      { handle: '@author3', author: 'Author Three', translatedAuthor: 'مصنف تین' },
+      { handle: '@author2', author: 'Author Two', translatedAuthor: 'مصنف دو' },
+      { handle: '@author1', author: 'Author One', translatedAuthor: 'مصنف ایک' },
+    ];
+    // Author Six has a saved override in controller
+    const activeCorrections = [
+      { handle: '@author6', urduName: 'مصنف چھ درست', originalName: 'Author Six', updatedAt: Date.now() },
+      { handle: '@saved_author_1', urduName: 'محفوظ مصنف ایک', originalName: 'Saved Author 1', updatedAt: Date.now() },
     ];
 
-    const { els, calls, corrections } = await runPopupHarness({}, existingCorrections);
+    const { els: elsB, calls, corrections } = await runPopupHarness({}, activeCorrections, sixRecentAuthors);
 
-    check('Count badge shows 1 saved', els.corrCountBadge.textContent.includes('1 saved'));
-    check('Empty state hidden', els.correctionsEmpty.classList.contains('hidden'));
-    check('correctionsList has children rendered', els.correctionsList.children && els.correctionsList.children.length === 1);
+    check('Count badge shows 5 recent (capped at 5)', elsB.corrCountBadge.textContent.includes('5 recent'));
+    check('Empty state hidden', elsB.correctionsEmpty.classList.contains('hidden'));
+    eq('correctionsList has exactly 5 children rendered', elsB.correctionsList.children.length, 5);
 
-    const row = els.correctionsList.children[0];
-    const textContent = row.children.map((c) => c.textContent || '').join(' ');
-    check('Row displays handle @imran_khan', textContent.includes('@imran_khan'));
-    check('Row displays Urdu spelling عمران خان', textContent.includes('عمران خان'));
-    check('Row displays original name Imran Khan', textContent.includes('Imran Khan'));
+    // Check that 6th author was dropped (only last 5 items)
+    const listText = elsB.correctionsList.children.map((c) => c.textContent || '').join(' ');
+    check('Top recent author6 is in list', listText.includes('@author6'));
+    check('author6 uses saved override spelling', listText.includes('مصنف چھ درست'));
+    check('author6 has Saved badge', listText.includes('Saved'));
+    check('author5 is in list', listText.includes('@author5'));
+    check('author2 is in list', listText.includes('@author2'));
+    check('author1 (oldest 6th) is excluded', !listText.includes('@author1'));
+    check('saved_author_1 (not in recent posts) is excluded', !listText.includes('@saved_author_1'));
 
-    // Find Delete button in row actions
-    const actionsDiv = row.children[1];
-    const delBtn = actionsDiv && actionsDiv.children && actionsDiv.children.find((b) => b.textContent === 'Delete');
-    check('Delete button exists in row', Boolean(delBtn));
+    // Check inline edit of a recent author (author5)
+    const row5 = elsB.correctionsList.children[1];
+    const actionsDiv5 = row5.children[1];
+    const editBtn5 = actionsDiv5.children.find((b) => b.textContent === 'Edit');
+    check('Edit button exists on row 5', Boolean(editBtn5));
 
-    // Click Delete
-    await delBtn.click();
+    // Click Edit on author5
+    await editBtn5.click();
+    const input = row5.children.find((c) => c.tagName === 'INPUT');
+    check('Inline input opened', Boolean(input));
+    eq('Inline input prefilled with current Urdu', input.value, 'مصنف پانچ');
 
-    const deleteCall = calls.find((c) => c.url.endsWith('/author-corrections') && c.method === 'DELETE');
-    check('DELETE /author-corrections called', Boolean(deleteCall));
-    eq('DELETE handle is @imran_khan', deleteCall.body.handle, '@imran_khan');
-    eq('Corrections list now empty', corrections.length, 0);
-    check('Count badge shows 0 saved after delete', els.corrCountBadge.textContent.includes('0 saved'));
+    // Type corrected spelling and click Save
+    input.value = 'مصنف پانچ تصحیح شدہ';
+    const btnRow = row5.children.find((c) => c.children && c.children.length === 2);
+    const saveBtn = btnRow.children.find((b) => b.textContent === 'Save');
+    await saveBtn.click();
+
+    const postCall = calls.find((c) => c.url.endsWith('/author-corrections') && c.method === 'POST' && c.body.handle === '@author5');
+    check('POST /author-corrections called for @author5', Boolean(postCall));
+    eq('POST urduName is new spelling', postCall.body.urduName, 'مصنف پانچ تصحیح شدہ');
+
+    // Check delete on author6 (which has Saved badge and Delete button)
+    const row6 = elsB.correctionsList.children[0];
+    const actionsDiv6 = row6.children[1];
+    const delBtn6 = actionsDiv6.children.find((b) => b.textContent === 'Delete');
+    check('Delete button exists on author6', Boolean(delBtn6));
+
+    await delBtn6.click();
+    const delCall = calls.find((c) => c.url.endsWith('/author-corrections') && c.method === 'DELETE' && c.body.handle === '@author6');
+    check('DELETE /author-corrections called for @author6', Boolean(delCall));
   }
 
   if (failures > 0) {

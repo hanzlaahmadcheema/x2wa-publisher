@@ -1065,36 +1065,95 @@ let lastCorrectionsJson = null;
 async function loadCorrections() {
   if (!ui.correctionsList) return;
   try {
-    const r = await req('/author-corrections');
-    if (!r.ok || !r.body || !Array.isArray(r.body.corrections)) {
-      return;
+    // 1. Fetch saved author corrections from controller
+    const corrRes = await req('/author-corrections');
+    const corrMap = new Map();
+    if (corrRes.ok && corrRes.body && Array.isArray(corrRes.body.corrections)) {
+      for (const c of corrRes.body.corrections) {
+        if (c.handle) corrMap.set(c.handle.toLowerCase(), c);
+      }
     }
-    const corrections = r.body.corrections;
-    const jsonStr = JSON.stringify(corrections);
+
+    // 2. Fetch recent posted authors (max 5)
+    let recentList = [];
+    try {
+      const recRes = await req('/recent-posted-authors');
+      if (recRes.ok && recRes.body && Array.isArray(recRes.body.authors)) {
+        recentList = recRes.body.authors;
+      }
+    } catch {}
+
+    // Fall back to extension storage if controller has none yet
+    if (!recentList || recentList.length === 0) {
+      const { recentPostedAuthors: storedRecents, latestTranslation } = await store.get(['recentPostedAuthors', 'latestTranslation']);
+      if (Array.isArray(storedRecents) && storedRecents.length > 0) {
+        recentList = storedRecents;
+      } else if (latestTranslation && (latestTranslation.handle || latestTranslation.author)) {
+        recentList = [{
+          handle: latestTranslation.handle || '',
+          author: latestTranslation.author || '',
+          translatedAuthor: latestTranslation.translatedAuthor || '',
+          timestamp: latestTranslation.timestamp || Date.now(),
+        }];
+      }
+    }
+
+    // Build the list of ONLY the authors of the last 5 posted items
+    const rawList = Array.isArray(recentList) ? recentList.slice(0, 5) : [];
+    const items = [];
+    const seen = new Set();
+
+    for (const r of rawList) {
+      if (!r) continue;
+      const rawHandle = (r.handle || r.authorHandle || '').trim();
+      const normHandle = rawHandle ? (rawHandle.startsWith('@') ? rawHandle : '@' + rawHandle) : '';
+      const author = (r.author || r.originalName || '').trim();
+      const dedupKey = (normHandle || author).toLowerCase();
+      if (!dedupKey || seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+
+      const saved = normHandle ? corrMap.get(normHandle.toLowerCase()) : null;
+      const urduName = (saved && saved.urduName) ? saved.urduName : (r.translatedAuthor || r.urduName || '');
+      const originalName = (saved && saved.originalName) ? saved.originalName : author;
+
+      items.push({
+        handle: normHandle || author,
+        originalName,
+        urduName,
+        hasSavedCorrection: Boolean(saved),
+        timestamp: r.timestamp || 0,
+      });
+      if (items.length >= 5) break;
+    }
+
+    const jsonStr = JSON.stringify(items);
     if (jsonStr === lastCorrectionsJson) {
       return;
     }
     lastCorrectionsJson = jsonStr;
-    renderCorrectionsList(corrections);
+    renderCorrectionsList(items);
   } catch {
     // Controller unreachable or error
   }
 }
 
-function renderCorrectionsList(corrections) {
+function renderCorrectionsList(items) {
   if (!ui.correctionsList) return;
   if (ui.corrCountBadge) {
-    ui.corrCountBadge.textContent = `${corrections.length} saved`;
+    ui.corrCountBadge.textContent = `${items.length} recent`;
   }
-  if (!corrections || corrections.length === 0) {
-    if (ui.correctionsEmpty) ui.correctionsEmpty.classList.remove('hidden');
+  if (!items || items.length === 0) {
+    if (ui.correctionsEmpty) {
+      ui.correctionsEmpty.textContent = 'No recently posted authors yet.';
+      ui.correctionsEmpty.classList.remove('hidden');
+    }
     ui.correctionsList.innerHTML = '';
     return;
   }
   if (ui.correctionsEmpty) ui.correctionsEmpty.classList.add('hidden');
   ui.correctionsList.innerHTML = '';
 
-  for (const c of corrections) {
+  for (const c of items) {
     const row = document.createElement('div');
     row.style.cssText = 'padding:7px 10px; background:var(--panel); border:1px solid var(--line); border-radius:6px; display:flex; justify-content:space-between; align-items:center; gap:8px;';
 
@@ -1109,18 +1168,28 @@ function renderCorrectionsList(corrections) {
     handleSpan.textContent = c.handle;
     top.appendChild(handleSpan);
 
-    if (c.originalName) {
+    if (c.originalName && c.originalName !== c.handle) {
       const origSpan = document.createElement('span');
       origSpan.style.cssText = 'color:var(--muted); font-size:10.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px;';
       origSpan.textContent = `(${c.originalName})`;
       top.appendChild(origSpan);
     }
+
+    if (c.hasSavedCorrection) {
+      const savedBadge = document.createElement('span');
+      savedBadge.style.cssText = 'font-size:10px; padding:1px 5px; border-radius:8px; background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); font-weight:600;';
+      savedBadge.textContent = 'Saved';
+      top.appendChild(savedBadge);
+    }
+
     info.appendChild(top);
 
     const urduDiv = document.createElement('div');
     urduDiv.dir = 'rtl';
-    urduDiv.style.cssText = 'font-size:13.5px; font-weight:600; color:var(--ink); margin-top:2px;';
-    urduDiv.textContent = c.urduName;
+    urduDiv.style.cssText = c.urduName
+      ? 'font-size:13.5px; font-weight:600; color:var(--ink); margin-top:2px;'
+      : 'font-size:11.5px; color:var(--muted); font-style:italic; margin-top:2px;';
+    urduDiv.textContent = c.urduName || '(No Urdu translation yet)';
     info.appendChild(urduDiv);
 
     row.appendChild(info);
@@ -1134,11 +1203,14 @@ function renderCorrectionsList(corrections) {
     editBtn.style.cssText = 'padding:2px 7px; font-size:11px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer;';
     actions.appendChild(editBtn);
 
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.textContent = 'Delete';
-    delBtn.style.cssText = 'padding:2px 7px; font-size:11px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:#e02424; cursor:pointer;';
-    actions.appendChild(delBtn);
+    let delBtn = null;
+    if (c.hasSavedCorrection) {
+      delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.textContent = 'Delete';
+      delBtn.style.cssText = 'padding:2px 7px; font-size:11px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:#e02424; cursor:pointer;';
+      actions.appendChild(delBtn);
+    }
 
     row.appendChild(actions);
 
@@ -1149,13 +1221,14 @@ function renderCorrectionsList(corrections) {
 
       const editTop = document.createElement('div');
       editTop.style.cssText = 'font-size:11px; color:var(--muted);';
-      editTop.textContent = `Editing: ${c.handle}${c.originalName ? ' (' + c.originalName + ')' : ''}`;
+      editTop.textContent = `Editing Urdu Name for: ${c.handle}${c.originalName ? ' (' + c.originalName + ')' : ''}`;
       row.appendChild(editTop);
 
       const input = document.createElement('input');
       input.type = 'text';
       input.dir = 'rtl';
-      input.value = c.urduName;
+      input.value = c.urduName || '';
+      input.placeholder = 'Enter Urdu spelling…';
       input.style.cssText = 'width:100%; font-size:13.5px; padding:4px 8px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:var(--ink);';
       row.appendChild(input);
 
@@ -1182,7 +1255,7 @@ function renderCorrectionsList(corrections) {
 
       cancelEditBtn.addEventListener('click', () => {
         lastCorrectionsJson = null;
-        renderCorrectionsList(corrections);
+        renderCorrectionsList(items);
       });
 
       saveEditBtn.addEventListener('click', async () => {
@@ -1199,13 +1272,28 @@ function renderCorrectionsList(corrections) {
             body: JSON.stringify({
               handle: c.handle,
               urduName: newUrdu,
-              originalName: c.originalName,
+              originalName: c.originalName || '',
             }),
           });
           if (r.ok && r.body && r.body.ok) {
+            // Update storage if needed
+            const { latestTranslation, recentPostedAuthors: curRecents } = await store.get(['latestTranslation', 'recentPostedAuthors']);
+            if (latestTranslation && latestTranslation.handle && latestTranslation.handle.toLowerCase() === c.handle.toLowerCase()) {
+              latestTranslation.translatedAuthor = newUrdu;
+              await store.set({ latestTranslation });
+            }
+            if (Array.isArray(curRecents)) {
+              const updatedRecents = curRecents.map((a) => {
+                if (a && a.handle && a.handle.toLowerCase() === c.handle.toLowerCase()) {
+                  return { ...a, translatedAuthor: newUrdu };
+                }
+                return a;
+              });
+              await store.set({ recentPostedAuthors: updatedRecents });
+            }
             lastCorrectionsJson = null;
             await loadCorrections();
-            if (ui.corrManageNote) setNote(ui.corrManageNote, `Updated correction for ${c.handle}.`, 'ok');
+            if (ui.corrManageNote) setNote(ui.corrManageNote, `Saved Urdu spelling for ${c.handle}.`, 'ok');
           } else {
             if (ui.corrManageNote) setNote(ui.corrManageNote, (r.body && r.body.error) || 'Failed to update correction.', 'error');
             saveEditBtn.disabled = false;
@@ -1218,27 +1306,29 @@ function renderCorrectionsList(corrections) {
     });
 
     // Delete button click
-    delBtn.addEventListener('click', async () => {
-      delBtn.disabled = true;
-      try {
-        const r = await req('/author-corrections', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ handle: c.handle }),
-        });
-        if (r.ok && r.body && r.body.ok) {
-          lastCorrectionsJson = null;
-          await loadCorrections();
-          if (ui.corrManageNote) setNote(ui.corrManageNote, `Deleted correction for ${c.handle}.`, 'idle');
-        } else {
-          if (ui.corrManageNote) setNote(ui.corrManageNote, (r.body && r.body.error) || 'Failed to delete correction.', 'error');
+    if (delBtn) {
+      delBtn.addEventListener('click', async () => {
+        delBtn.disabled = true;
+        try {
+          const r = await req('/author-corrections', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ handle: c.handle }),
+          });
+          if (r.ok && r.body && r.body.ok) {
+            lastCorrectionsJson = null;
+            await loadCorrections();
+            if (ui.corrManageNote) setNote(ui.corrManageNote, `Deleted saved correction for ${c.handle}.`, 'idle');
+          } else {
+            if (ui.corrManageNote) setNote(ui.corrManageNote, (r.body && r.body.error) || 'Failed to delete correction.', 'error');
+            delBtn.disabled = false;
+          }
+        } catch (e) {
+          if (ui.corrManageNote) setNote(ui.corrManageNote, formatFetchError(e, 'Delete failed'), 'error');
           delBtn.disabled = false;
         }
-      } catch (e) {
-        if (ui.corrManageNote) setNote(ui.corrManageNote, formatFetchError(e, 'Delete failed'), 'error');
-        delBtn.disabled = false;
-      }
-    });
+      });
+    }
 
     ui.correctionsList.appendChild(row);
   }
@@ -1255,16 +1345,23 @@ function initAuthorCorrections() {
         return;
       }
 
-      // Check stored latest translation
-      const { latestTranslation } = await store.get(['latestTranslation']);
-      if (latestTranslation && latestTranslation.handle) {
-        const h = latestTranslation.handle.startsWith('@') ? latestTranslation.handle : `@${latestTranslation.handle}`;
-        if (ui.corrAuthorDisplay) ui.corrAuthorDisplay.textContent = latestTranslation.author || latestTranslation.handle;
+      // Check stored latest translation or recent posted authors
+      const { latestTranslation, recentPostedAuthors } = await store.get(['latestTranslation', 'recentPostedAuthors']);
+      const target = (latestTranslation && (latestTranslation.handle || latestTranslation.author))
+        ? latestTranslation
+        : (Array.isArray(recentPostedAuthors) && recentPostedAuthors[0] ? recentPostedAuthors[0] : null);
+
+      if (target && (target.handle || target.author)) {
+        const rawH = target.handle || '';
+        const h = rawH ? (rawH.startsWith('@') ? rawH : `@${rawH}`) : '';
+        const dispName = target.author || h || 'Author';
+        const urduVal = target.translatedAuthor || target.urduName || '';
+        if (ui.corrAuthorDisplay) ui.corrAuthorDisplay.textContent = dispName;
         if (ui.corrAuthorHandle) ui.corrAuthorHandle.textContent = h;
-        if (ui.corrLatestTranslated) ui.corrLatestTranslated.textContent = latestTranslation.translatedAuthor || '—';
-        if (ui.corrUrduInput) ui.corrUrduInput.value = latestTranslation.translatedAuthor || '';
-        ui.authorCorrectionForm.dataset.handle = h;
-        ui.authorCorrectionForm.dataset.author = latestTranslation.author || '';
+        if (ui.corrLatestTranslated) ui.corrLatestTranslated.textContent = urduVal || '—';
+        if (ui.corrUrduInput) ui.corrUrduInput.value = urduVal;
+        ui.authorCorrectionForm.dataset.handle = h || dispName;
+        ui.authorCorrectionForm.dataset.author = target.author || '';
         ui.authorCorrectionForm.classList.remove('hidden');
         setNote(ui.corrNote, '', 'idle');
         if (ui.corrUrduInput) {

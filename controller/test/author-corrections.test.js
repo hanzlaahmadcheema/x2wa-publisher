@@ -206,6 +206,7 @@ function fakeFetch(responses) {
   console.log('3. Controller HTTP API endpoint handlers (/author-corrections)');
   {
     const apiStore = new OverridesStore(path.join(tmpDir, 'api-overrides.json'));
+    const testRecentAuthors = [];
     // Setup isolated test HTTP server matching server.js endpoint logic
     const testServer = http.createServer(async (req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1');
@@ -251,6 +252,18 @@ function fakeFetch(responses) {
         if (!handle) return json(400, { ok: false, error: 'missing-handle' });
         const removed = await apiStore.deleteCorrection(handle);
         return json(200, { ok: true, deleted: removed, count: apiStore.listCorrections().length });
+      }
+
+      if (req.method === 'GET' && url.pathname === '/recent-posted-authors') {
+        return json(200, { ok: true, authors: testRecentAuthors });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/recent-posted-authors') {
+        let body = {};
+        try { body = JSON.parse(await readBody()); } catch {}
+        testRecentAuthors.unshift(body);
+        if (testRecentAuthors.length > 5) testRecentAuthors.length = 5;
+        return json(200, { ok: true, authors: testRecentAuthors });
       }
 
       json(404, { error: 'not-found' });
@@ -326,6 +339,21 @@ function fakeFetch(responses) {
     // GET again confirms empty
     const r5 = await apiReq('GET', '/author-corrections');
     eq('list empty after delete', r5.body.corrections.length, 0);
+
+    // GET /recent-posted-authors initially empty
+    const rRec1 = await apiReq('GET', '/recent-posted-authors');
+    check('GET /recent-posted-authors ok', rRec1.ok);
+    eq('recent posted authors list initially empty', rRec1.body.authors, []);
+
+    // POST /recent-posted-authors records a posted author
+    const rRec2 = await apiReq('POST', '/recent-posted-authors', {
+      handle: '@recent_post_user',
+      author: 'Recent Post User',
+      translatedAuthor: 'حالیہ پوسٹ صارف',
+    });
+    check('POST /recent-posted-authors ok', rRec2.ok);
+    eq('recent list has 1 author', rRec2.body.authors.length, 1);
+    eq('recent author handle preserved', rRec2.body.authors[0].handle, '@recent_post_user');
 
     testServer.close();
   }

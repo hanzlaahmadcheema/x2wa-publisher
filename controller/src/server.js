@@ -71,7 +71,7 @@ const crypto = require('crypto');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode-generator');
-const { sessionDir, tmpRoot, acquireSessionLock, chromePath } = require('./platform');
+const { userDataRoot, sessionDir, tmpRoot, acquireSessionLock, chromePath } = require('./platform');
 const { listPostableChannels, canPostToChannel } = require('./channels');
 const { createHeartbeat, isStartupStuck } = require('./heartbeat');
 const repo = require('./repo');
@@ -115,6 +115,79 @@ const DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 // opening an unbounded number of sockets.
 const HLS_CONCURRENCY = 8;
 const HLS_RETRIES = 3;
+
+// --- Recent Posted Authors (Last 5 items) Store ---
+const RECENT_AUTHORS_FILE = process.env.RECENT_AUTHORS_PATH || path.join(userDataRoot(), 'recent-posted-authors.json');
+
+function loadRecentPostedAuthors() {
+  try {
+    if (fs.existsSync(RECENT_AUTHORS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(RECENT_AUTHORS_FILE, 'utf8'));
+      if (Array.isArray(data)) {
+        return data.slice(0, 5);
+      }
+    }
+  } catch (e) {
+    // ignore parse error, fallback to []
+  }
+  return [];
+}
+
+let recentPostedAuthors = loadRecentPostedAuthors();
+
+function saveRecentPostedAuthors(list) {
+  recentPostedAuthors = (Array.isArray(list) ? list : []).slice(0, 5);
+  try {
+    const dir = path.dirname(RECENT_AUTHORS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${RECENT_AUTHORS_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(recentPostedAuthors, null, 2), 'utf8');
+    fs.renameSync(tmp, RECENT_AUTHORS_FILE);
+  } catch (e) {
+    log('warn', 'recent-authors-save-failed', { error: errMsg(e) });
+  }
+}
+
+function recordRecentPostedAuthor(item) {
+  if (!item) return;
+  const handle = (item.handle || item.authorHandle || '').trim();
+  const author = (item.author || item.originalName || '').trim();
+  const translatedAuthor = (item.translatedAuthor || item.urduName || '').trim();
+  if (!handle && !author) return;
+
+  const normHandle = handle ? (handle.startsWith('@') ? handle : '@' + handle) : '';
+  const entry = {
+    handle: normHandle,
+    author,
+    translatedAuthor,
+    timestamp: item.timestamp || Date.now(),
+    tweetId: item.tweetId || null,
+  };
+
+  const filtered = recentPostedAuthors.filter((a) => {
+    if (normHandle && a.handle && a.handle.toLowerCase() === normHandle.toLowerCase()) return false;
+    if (!normHandle && author && a.author && a.author.toLowerCase() === author.toLowerCase()) return false;
+    return true;
+  });
+
+  saveRecentPostedAuthors([entry, ...filtered]);
+}
+
+function updateRecentAuthorCorrection(handle, urduName) {
+  if (!handle) return;
+  const norm = handle.startsWith('@') ? handle.toLowerCase() : '@' + handle.toLowerCase();
+  let changed = false;
+  const updated = recentPostedAuthors.map((a) => {
+    if (a.handle && a.handle.toLowerCase() === norm) {
+      changed = true;
+      return { ...a, translatedAuthor: urduName };
+    }
+    return a;
+  });
+  if (changed) {
+    saveRecentPostedAuthors(updated);
+  }
+}
 
 fs.mkdirSync(TMP_ROOT, { recursive: true });
 // Refuse to start a second client against the same session directory.
@@ -1010,6 +1083,18 @@ async function runSend(body) {
     jobs.set(jobId, { status: ok ? 'completed' : (partial ? 'partial' : 'failed'), sent, failures });
     cleanup(jobDir);
     log('info','send-job-complete',{requestId,jobId,status: ok ? 'completed' : (partial ? 'partial' : 'failed'),sent:sent.length,failed:failures.length});
+    if (ok || partial) {
+      try {
+        recordRecentPostedAuthor({
+          handle: body.authorHandle || (translationMeta && translationMeta.authorHandle) || '',
+          author: body.author || (translationMeta && translationMeta.author) || '',
+          translatedAuthor: (translationMeta && translationMeta.translatedAuthor) || '',
+          tweetId: body.tweetId || null,
+        });
+      } catch (e) {
+        log('warn', 'record-recent-posted-author-failed', { error: errMsg(e) });
+      }
+    }
     if (ok) return { ok: true, jobId, sent, ...(translationMeta ? { translation: translationMeta } : {}) };
     if (partial) return { ok: false, jobId, sent, partial: true, failures, error: 'partial-send', ...(translationMeta ? { translation: translationMeta } : {}) };
     return { ok: false, jobId, error: failures.length ? failures[failures.length - 1].error : 'send-failed', ...(failures.length ? { failures } : {}) };
@@ -1421,8 +1506,10 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const entry = await overridesStore.setCorrection({ handle, urduName, originalName });
+        updateRecentAuthorCorrection(entry.handle, entry.transliteration);
         log('info', 'author-correction-saved', { handle: entry.handle, urduName: entry.transliteration });
-        return json(res, 200, { ok: true, entry });
+        const count = typeof overridesStore.listCorrections === 'function' ? overridesStore.listCorrections().length : 1;
+        return json(res, 200, { ok: true, entry, correction: entry, count });
       } catch (e) {
         log('warn', 'author-correction-save-failed', { error: errMsg(e) });
         return json(res, 500, { ok: false, error: (e && e.message) || 'save-failed' });
@@ -1440,12 +1527,24 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const r = await overridesStore.deleteCorrection(handle);
+        updateRecentAuthorCorrection(handle, '');
         log('info', 'author-correction-deleted', { handle, removed: r.removed });
-        return json(res, 200, { ok: true, removed: r.removed });
+        const count = typeof overridesStore.listCorrections === 'function' ? overridesStore.listCorrections().length : 0;
+        return json(res, 200, { ok: true, removed: r.removed, deleted: r.removed, count });
       } catch (e) {
         log('warn', 'author-correction-delete-failed', { error: errMsg(e) });
         return json(res, 500, { ok: false, error: 'delete-failed' });
       }
+    }
+    // --- Recent Posted Authors Endpoints ---
+    if (req.method === 'GET' && (url.pathname === '/recent-posted-authors' || url.pathname === '/author-corrections/recent')) {
+      return json(res, 200, { ok: true, authors: recentPostedAuthors });
+    }
+    if (req.method === 'POST' && url.pathname === '/recent-posted-authors') {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { ok: false, error: 'bad-request' }); }
+      recordRecentPostedAuthor(body);
+      return json(res, 200, { ok: true, authors: recentPostedAuthors });
     }
     if (req.method === 'POST' && url.pathname === '/send') {
       if (state !== 'ready') { log('error','send-rejected-whatsapp-not-ready',{state}); return json(res, 409, { error: 'whatsapp-not-ready', state }); }

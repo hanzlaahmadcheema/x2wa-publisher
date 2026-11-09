@@ -600,14 +600,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         body: JSON.stringify(payload),
       });
       const j = await res.json();
-      if (j && (j.ok || j.partial) && j.translation) {
-        const trData = {
-          author: (j.translation && j.translation.author) || p.author || null,
-          handle: (j.translation && j.translation.authorHandle) || p.authorHandle || null,
-          translatedAuthor: (j.translation && j.translation.translatedAuthor) || '',
-          timestamp: Date.now(),
-        };
-        chrome.storage.local.set({ latestTranslation: trData });
+      if (j && (j.ok || j.partial)) {
+        if (j.translation) {
+          const trData = {
+            author: (j.translation && j.translation.author) || p.author || null,
+            handle: (j.translation && j.translation.authorHandle) || p.authorHandle || null,
+            translatedAuthor: (j.translation && j.translation.translatedAuthor) || '',
+            timestamp: Date.now(),
+          };
+          chrome.storage.local.set({ latestTranslation: trData });
+        }
+        try {
+          const authItem = {
+            handle: (j.translation && j.translation.authorHandle) || p.authorHandle || '',
+            author: (j.translation && j.translation.author) || p.author || '',
+            translatedAuthor: (j.translation && j.translation.translatedAuthor) || '',
+            timestamp: Date.now(),
+            tweetId: p.tweetId || null,
+          };
+          if (authItem.handle || authItem.author) {
+            if (authItem.handle && !authItem.handle.startsWith('@')) {
+              authItem.handle = '@' + authItem.handle;
+            }
+            const { recentPostedAuthors: existing = [] } = await chrome.storage.local.get(['recentPostedAuthors']);
+            const filtered = (Array.isArray(existing) ? existing : []).filter((a) => {
+              if (authItem.handle && a.handle && a.handle.toLowerCase() === authItem.handle.toLowerCase()) return false;
+              if (!authItem.handle && authItem.author && a.author && a.author.toLowerCase() === authItem.author.toLowerCase()) return false;
+              return true;
+            });
+            const updated = [authItem, ...filtered].slice(0, 5);
+            chrome.storage.local.set({ recentPostedAuthors: updated });
+          }
+        } catch (e) {
+          swLog('warn', 'recent-posted-authors-update-failed', { error: e && e.message });
+        }
       }
       if (j && j.ok) return reply(sendResponse, { ok: true, jobId: j.jobId, sent: j.sent, ...(j.translation ? { translation: j.translation } : {}) });
       if (j && j.partial) return reply(sendResponse, { ok: false, partial: true, jobId: j.jobId, sent: j.sent, failures: j.failures, error: j.error || 'partial-send' });
