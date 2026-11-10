@@ -171,6 +171,64 @@ function recordRecentPostedAuthor(item) {
   });
 
   saveRecentPostedAuthors([entry, ...filtered]);
+
+  // If translatedAuthor is not yet populated, resolve it asynchronously
+  if (!translatedAuthor || !isUrduText(translatedAuthor)) {
+    getOrGenerateAuthorUrdu(author, normHandle).then((urdu) => {
+      if (urdu) {
+        let changed = false;
+        const updated = recentPostedAuthors.map((a) => {
+          if (normHandle && a.handle && a.handle.toLowerCase() === normHandle.toLowerCase()) {
+            if (!a.translatedAuthor) { changed = true; return { ...a, translatedAuthor: urdu }; }
+          }
+          return a;
+        });
+        if (changed) saveRecentPostedAuthors(updated);
+      }
+    }).catch(() => {});
+  }
+}
+
+async function getOrGenerateAuthorUrdu(authorName, handle) {
+  if (!authorName && !handle) return '';
+  const name = (authorName || handle || '').replace(/^[@\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+  if (!name) return '';
+
+  // 1. Check saved corrections
+  const corr = handle && typeof overridesStore.getCorrection === 'function'
+    ? overridesStore.getCorrection(handle)
+    : (handle ? overridesStore.lookup(name, handle) : overridesStore.lookup(name, null));
+  if (corr && (corr.urduName || corr.transliteration)) {
+    return (corr.urduName || corr.transliteration).trim();
+  }
+
+  // 2. Already written in Urdu script
+  if (isUrduText(name) && !/[A-Za-z]/.test(name)) {
+    return name;
+  }
+
+  // 3. Groq dual format
+  if (isGroqConfigured()) {
+    try {
+      const dual = await formatAuthorNameDual(name);
+      if (dual && dual.includes('|')) {
+        const clean = dual.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+        const parts = clean.split('|').map(p => p.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim());
+        const urdu = parts.find(p => isUrduText(p));
+        if (urdu) return urdu;
+      }
+    } catch {}
+  }
+
+  // 4. Input tools / transliterate
+  try {
+    const res = await resolveTransliteration(name, handle);
+    if (res && res.text && isUrduText(res.text)) {
+      return res.text.trim();
+    }
+  } catch {}
+
+  return '';
 }
 
 function updateRecentAuthorCorrection(handle, urduName) {
@@ -1083,20 +1141,33 @@ async function runSend(body) {
     jobs.set(jobId, { status: ok ? 'completed' : (partial ? 'partial' : 'failed'), sent, failures });
     cleanup(jobDir);
     log('info','send-job-complete',{requestId,jobId,status: ok ? 'completed' : (partial ? 'partial' : 'failed'),sent:sent.length,failed:failures.length});
+    let authorUrdu = (translationMeta && translationMeta.translatedAuthor) || '';
+    if (!authorUrdu && (body.author || body.authorHandle)) {
+      try {
+        authorUrdu = await getOrGenerateAuthorUrdu(body.author, body.authorHandle);
+      } catch {}
+    }
     if (ok || partial) {
       try {
         recordRecentPostedAuthor({
           handle: body.authorHandle || (translationMeta && translationMeta.authorHandle) || '',
           author: body.author || (translationMeta && translationMeta.author) || '',
-          translatedAuthor: (translationMeta && translationMeta.translatedAuthor) || '',
+          translatedAuthor: authorUrdu,
           tweetId: body.tweetId || null,
         });
       } catch (e) {
         log('warn', 'record-recent-posted-author-failed', { error: errMsg(e) });
       }
     }
-    if (ok) return { ok: true, jobId, sent, ...(translationMeta ? { translation: translationMeta } : {}) };
-    if (partial) return { ok: false, jobId, sent, partial: true, failures, error: 'partial-send', ...(translationMeta ? { translation: translationMeta } : {}) };
+    const metaToSend = translationMeta
+      ? { ...translationMeta, translatedAuthor: authorUrdu || translationMeta.translatedAuthor }
+      : (body.author ? {
+          author: body.author,
+          authorHandle: body.authorHandle || null,
+          translatedAuthor: authorUrdu,
+        } : null);
+    if (ok) return { ok: true, jobId, sent, ...(metaToSend ? { translation: metaToSend } : {}) };
+    if (partial) return { ok: false, jobId, sent, partial: true, failures, error: 'partial-send', ...(metaToSend ? { translation: metaToSend } : {}) };
     return { ok: false, jobId, error: failures.length ? failures[failures.length - 1].error : 'send-failed', ...(failures.length ? { failures } : {}) };
   } catch (e) {
     try{ log('error','send-job-error',{requestId,jobId,message:e&&e.message,stack:e&&e.stack}); }catch{}
@@ -1538,6 +1609,28 @@ const server = http.createServer(async (req, res) => {
     }
     // --- Recent Posted Authors Endpoints ---
     if (req.method === 'GET' && (url.pathname === '/recent-posted-authors' || url.pathname === '/author-corrections/recent')) {
+      let updated = false;
+      for (const a of recentPostedAuthors) {
+        const corr = a.handle && typeof overridesStore.getCorrection === 'function'
+          ? overridesStore.getCorrection(a.handle)
+          : (a.handle ? overridesStore.lookup(a.author, a.handle) : overridesStore.lookup(a.author, null));
+        if (corr && (corr.urduName || corr.transliteration)) {
+          const pref = (corr.urduName || corr.transliteration).trim();
+          if (a.translatedAuthor !== pref) {
+            a.translatedAuthor = pref;
+            updated = true;
+          }
+        } else if (!a.translatedAuthor || !isUrduText(a.translatedAuthor)) {
+          const generated = await getOrGenerateAuthorUrdu(a.author, a.handle);
+          if (generated) {
+            a.translatedAuthor = generated;
+            updated = true;
+          }
+        }
+      }
+      if (updated) {
+        saveRecentPostedAuthors(recentPostedAuthors);
+      }
       return json(res, 200, { ok: true, authors: recentPostedAuthors });
     }
     if (req.method === 'POST' && url.pathname === '/recent-posted-authors') {

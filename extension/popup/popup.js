@@ -1113,8 +1113,23 @@ async function loadCorrections() {
       seen.add(dedupKey);
 
       const saved = normHandle ? corrMap.get(normHandle.toLowerCase()) : null;
-      const urduName = (saved && saved.urduName) ? saved.urduName : (r.translatedAuthor || r.urduName || '');
+      let urduName = (saved && saved.urduName) ? saved.urduName : (r.translatedAuthor || r.urduName || '');
       const originalName = (saved && saved.originalName) ? saved.originalName : author;
+
+      if (!urduName && (originalName || normHandle)) {
+        try {
+          const tRes = await req('/transliterate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: originalName || normHandle, handle: normHandle }),
+          });
+          if (tRes && tRes.ok && tRes.body && tRes.body.text) {
+            const clean = tRes.body.text.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+            const parts = clean.split('|').map((x) => x.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim());
+            urduName = parts.find((x) => /[\u0600-\u06FF]/.test(x)) || parts[0] || '';
+          }
+        } catch {}
+      }
 
       items.push({
         handle: normHandle || author,
@@ -1224,11 +1239,16 @@ function renderCorrectionsList(items) {
       editTop.textContent = `Editing Urdu Name for: ${c.handle}${c.originalName ? ' (' + c.originalName + ')' : ''}`;
       row.appendChild(editTop);
 
+      const genNotice = document.createElement('div');
+      genNotice.style.cssText = 'font-size:11px; color:var(--muted); display:flex; justify-content:space-between; align-items:center;';
+      genNotice.innerHTML = `<span>Generated Urdu Name:</span> <strong dir="rtl" style="color:var(--ink); font-size:12.5px;">${c.urduName || '—'}</strong>`;
+      row.appendChild(genNotice);
+
       const input = document.createElement('input');
       input.type = 'text';
       input.dir = 'rtl';
       input.value = c.urduName || '';
-      input.placeholder = 'Enter Urdu spelling…';
+      input.placeholder = 'Enter corrected Urdu spelling…';
       input.style.cssText = 'width:100%; font-size:13.5px; padding:4px 8px; border-radius:4px; border:1px solid var(--line); background:var(--bg); color:var(--ink);';
       row.appendChild(input);
 
@@ -1355,7 +1375,21 @@ function initAuthorCorrections() {
         const rawH = target.handle || '';
         const h = rawH ? (rawH.startsWith('@') ? rawH : `@${rawH}`) : '';
         const dispName = target.author || h || 'Author';
-        const urduVal = target.translatedAuthor || target.urduName || '';
+        let urduVal = target.translatedAuthor || target.urduName || '';
+        if (!urduVal && (dispName || h)) {
+          try {
+            const tRes = await req('/transliterate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: dispName || h, handle: h }),
+            });
+            if (tRes && tRes.ok && tRes.body && tRes.body.text) {
+              const clean = tRes.body.text.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+              const parts = clean.split('|').map((x) => x.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim());
+              urduVal = parts.find((x) => /[\u0600-\u06FF]/.test(x)) || parts[0] || '';
+            }
+          } catch {}
+        }
         if (ui.corrAuthorDisplay) ui.corrAuthorDisplay.textContent = dispName;
         if (ui.corrAuthorHandle) ui.corrAuthorHandle.textContent = h;
         if (ui.corrLatestTranslated) ui.corrLatestTranslated.textContent = urduVal || '—';

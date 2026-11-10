@@ -601,20 +601,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       });
       const j = await res.json();
       if (j && (j.ok || j.partial)) {
-        if (j.translation) {
-          const trData = {
-            author: (j.translation && j.translation.author) || p.author || null,
-            handle: (j.translation && j.translation.authorHandle) || p.authorHandle || null,
-            translatedAuthor: (j.translation && j.translation.translatedAuthor) || '',
-            timestamp: Date.now(),
-          };
-          chrome.storage.local.set({ latestTranslation: trData });
+        let trAuthor = (j.translation && j.translation.translatedAuthor) || '';
+        if (!trAuthor && (p.author || p.authorHandle)) {
+          try {
+            const trRes = await fetch(`${CONTROLLER}/transliterate`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: p.author || p.authorHandle, handle: p.authorHandle || null }),
+            });
+            const trJ = await trRes.json();
+            if (trJ && trJ.text) {
+              const clean = trJ.text.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+              const parts = clean.split('|').map(x => x.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim());
+              trAuthor = parts.find(x => /[\u0600-\u06FF]/.test(x)) || parts[0] || '';
+            }
+          } catch {}
         }
+
+        const trData = {
+          author: (j.translation && j.translation.author) || p.author || null,
+          handle: (j.translation && j.translation.authorHandle) || p.authorHandle || null,
+          translatedAuthor: trAuthor,
+          timestamp: Date.now(),
+        };
+        chrome.storage.local.set({ latestTranslation: trData });
+
         try {
           const authItem = {
             handle: (j.translation && j.translation.authorHandle) || p.authorHandle || '',
             author: (j.translation && j.translation.author) || p.author || '',
-            translatedAuthor: (j.translation && j.translation.translatedAuthor) || '',
+            translatedAuthor: trAuthor,
             timestamp: Date.now(),
             tweetId: p.tweetId || null,
           };
