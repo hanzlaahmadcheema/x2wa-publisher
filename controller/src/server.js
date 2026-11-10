@@ -915,6 +915,10 @@ async function runSend(body) {
     // original, which would be the wrong language with nothing to show for it.
     let outText = text;
     let translationMeta = null;
+
+    const isNamedVariant = body.variant === 'named' || body.nameTheAuthor === true;
+    const isPlainVariant = body.variant === 'plain' || (body.nameTheAuthor === false && !body.translateTo);
+
     if (body.translateTo) {
       const target = String(body.translateTo);
       const t0 = Date.now();
@@ -944,52 +948,67 @@ async function runSend(body) {
         log('warn','translate-failed',{requestId,jobId,target,error:errMsg(e)});
         return { ok: false, error: 'translate-failed', jobId, retryable: true };
       }
-    } else if (body.author && typeof text === 'string') {
-      const authorHandle = body.authorHandle || body.handle || null;
-      const correction = authorHandle && typeof overridesStore.getCorrection === 'function'
-        ? overridesStore.getCorrection(authorHandle)
-        : (overridesStore.lookup(body.author, authorHandle));
-      const authorTrimmed = body.author.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
-      const sep = text.indexOf('\n\n');
-      const header = (sep > 0 ? text.slice(0, sep) : text).trim();
-      const bodyContent = sep > 0 ? text.slice(sep + 2).trim() : '';
-
-      if (correction && correction.transliteration) {
-        const preferredUrdu = correction.transliteration.trim();
-        const rightAuthor = formatDualAuthorForUrdu(`${preferredUrdu} | ${authorTrimmed}`);
-        outText = bodyContent ? `${rightAuthor}\n\n${bodyContent}` : rightAuthor;
-      } else {
-      // For author name button (no translateTo):
-      // If the post is in Urdu, write author name in both English and Urdu: `English Name   |   Urdu Name` (RIGHT side)
-      // If the post is in English, author name remains in English only: `English Name` (LEFT side)
+    } else if (isPlainVariant) {
+      // 1. PLAIN POST (WhatsApp Icon):
+      // The user wants the normal post as it is: NO author name in the post text!
+      // If the incoming text had an author header prepended, strip it cleanly so only the original post text remains.
+      if (text && typeof text === 'string') {
+        const sep = text.indexOf('\n\n');
+        if (sep > 0) {
+          const firstLine = text.slice(0, sep).trim();
+          const cleanFirst = firstLine.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
+          const rawAuthor = (body.author && typeof body.author === 'string') ? body.author.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim() : '';
+          const isAuthorFirstLine = cleanFirst.includes('|') || (rawAuthor && cleanFirst.toLowerCase() === rawAuthor.toLowerCase());
+          if (isAuthorFirstLine) {
+            outText = text.slice(sep + 2).trim();
+          } else {
+            outText = text;
+          }
+        } else {
+          outText = text;
+        }
+      }
+    } else if (isNamedVariant && body.author && typeof text === 'string') {
+      // 2. POST WITH AUTHOR NAME (Username Icon / @ icon):
+      // Must include author name at the top:
+      // - English post: Author in English only, on LEFT side (`\u200E`Author`\u200E`)
+      // - Urdu post: Dual author (Urdu | English), on RIGHT side (`\u200F`Urdu | English`\u200F`)
       const sep = text.indexOf('\n\n');
       const header = (sep > 0 ? text.slice(0, sep) : text).trim();
       const bodyContent = sep > 0 ? text.slice(sep + 2).trim() : '';
       const authorTrimmed = body.author.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
       const cleanHeader = header.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
-      const isAuthorHeader = cleanHeader.toLowerCase() === authorTrimmed.toLowerCase() || cleanHeader === authorTrimmed;
-      if (isAuthorHeader) {
-        if (isUrduText(bodyContent || cleanHeader)) {
-          try {
-            const dualAuthor = await formatAuthorNameDual(authorTrimmed);
-            if (dualAuthor) {
-              const cleanDual = dualAuthor.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim();
-              const rightAuthor = formatDualAuthorForUrdu(cleanDual);
-              outText = bodyContent ? `${rightAuthor}\n\n${bodyContent}` : rightAuthor;
-            }
-          } catch {}
-        } else {
-          const leftAuthor = `\u200E\`${cleanHeader}\`\u200E`;
-          outText = bodyContent ? `${leftAuthor}\n\n${bodyContent}` : leftAuthor;
-        }
-      }
-    }
-  }
+      const isAuthorHeader = cleanHeader.includes('|') || (authorTrimmed && cleanHeader.toLowerCase() === authorTrimmed.toLowerCase());
+      const effectiveBody = isAuthorHeader ? bodyContent : text;
 
-    // Ensure author line alignment adheres strictly:
-    // - Urdu post: author line on RIGHT side (\u200F)
-    // - English post: author line on LEFT side (\u200E)
-    if (outText && typeof outText === 'string') {
+      const authorHandle = body.authorHandle || body.handle || null;
+      const isUrduPost = isUrduText(effectiveBody);
+
+      if (isUrduPost) {
+        // Urdu post: dual author on the RIGHT
+        const correction = authorHandle && typeof overridesStore.getCorrection === 'function'
+          ? overridesStore.getCorrection(authorHandle)
+          : overridesStore.lookup(body.author, authorHandle);
+        let urduPart = (correction && (correction.urduName || correction.transliteration)) || '';
+        if (!urduPart) {
+          try {
+            urduPart = await getOrGenerateAuthorUrdu(body.author, authorHandle);
+          } catch {}
+        }
+        const dualStr = urduPart ? `${urduPart} | ${authorTrimmed}` : authorTrimmed;
+        const rightAuthor = formatDualAuthorForUrdu(dualStr);
+        outText = effectiveBody ? `${rightAuthor}\n\n${effectiveBody}` : rightAuthor;
+      } else {
+        // English post: author in English ONLY, on the LEFT side
+        const leftAuthor = `\u200E\`${authorTrimmed}\`\u200E`;
+        outText = effectiveBody ? `${leftAuthor}\n\n${effectiveBody}` : leftAuthor;
+      }
+    } else {
+      outText = text;
+    }
+
+    // Ensure author line alignment adheres strictly for Urdu or named posts:
+    if (!isPlainVariant && outText && typeof outText === 'string') {
       const sep = outText.indexOf('\n\n');
       if (sep > 0) {
         const firstLine = outText.slice(0, sep).trim();
@@ -998,7 +1017,7 @@ async function runSend(body) {
         const rawAuthor = (body.author && typeof body.author === 'string') ? body.author.replace(/^[\u200E\u200F`]+|[\u200E\u200F`]+$/g, '').trim() : '';
         const isAuthorFirstLine = cleanFirst.includes('|') || (rawAuthor && cleanFirst.toLowerCase() === rawAuthor.toLowerCase());
         if (isAuthorFirstLine) {
-          const isUrduPost = isUrduText(bodyContent || cleanFirst) || body.translateTo === 'ur';
+          const isUrduPost = isUrduText(bodyContent) || body.translateTo === 'ur';
           if (isUrduPost) {
             outText = `${formatDualAuthorForUrdu(cleanFirst)}\n\n${bodyContent}`;
           } else {

@@ -439,6 +439,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         tweetId: shotId,
         tweetUrl: (msg.post && msg.post.tweetUrl) || null,
         text: (msg.post && msg.post.text) || '',
+        variant: msg.variant || 'plain',
+        nameTheAuthor: Boolean(msg.nameTheAuthor),
         media: [{ type: 'image', source: shot.dataUrl }],
         mediaFailures: [],
         channelId,
@@ -566,6 +568,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         author: p.author || null,
         authorHandle: p.authorHandle || null,
         text: p.text,
+        variant: msg.variant || (msg.translateTo ? 'urdu' : (msg.nameTheAuthor ? 'named' : 'plain')),
+        nameTheAuthor: msg.nameTheAuthor !== undefined ? Boolean(msg.nameTheAuthor) : Boolean(msg.variant === 'named'),
         media: media.filter((m) => m.source),
         mediaFailures,
         // Kept under the old key too so an older controller still sees them.

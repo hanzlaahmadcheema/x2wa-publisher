@@ -20,7 +20,7 @@
 const POST_VARIANTS = {
   plain: { action: 'Post to WhatsApp',      icon: 'whatsapp', color: '#536471', nameTheAuthor: false, translateTo: null },
   named: { action: 'Post with author name', icon: 'at',       color: '#536471', nameTheAuthor: true,  translateTo: null },
-  urdu:  { action: 'Post in Urdu',          icon: 'globe',    color: '#536471', nameTheAuthor: true,  translateTo: 'ur' },
+  urdu:  { action: 'Post in Urdu',          icon: 'globe',    color: '#536471', nameTheAuthor: false, translateTo: 'ur' },
 };
 
 // Look a variant up, falling back to the plain one so a name that is ever

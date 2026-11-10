@@ -331,6 +331,8 @@ async function sendElementShot(targetEl, clipRect, params) {
       rect: measured.rect,
       scroll: measured.scroll,
       dedupeKey: params.dedupeKey,
+      variant: params.variant || 'plain',
+      nameTheAuthor: Boolean(params.nameTheAuthor),
       // The caption is the post's own words; the Urdu button asks the
       // controller to translate them, exactly as a normal post's text is.
       ...(params.translateTo ? { translateTo: params.translateTo } : {}),
@@ -425,6 +427,8 @@ function wireShotButton(btn) {
     const result = await sendElementShot(target, clipRect, {
       requestId,
       caption,
+      variant: 'plain',
+      nameTheAuthor: false,
       dedupeKey: shotKey(tweetId) || `shot:${requestId}`,
       tweetId,
       tweetUrl,
@@ -768,6 +772,8 @@ async function postQuoteShot(btn, v, variant, article, quoteEl, requestId) {
     const result = await sendElementShot(quoteEl, quoteEl.getBoundingClientRect(), {
       requestId,
       caption,
+      variant,
+      nameTheAuthor: Boolean(v.nameTheAuthor),
       translateTo: v.translateTo,
       dedupeKey: shotKey(post.tweetId) || `shot:${requestId}`,
       tweetId: post.tweetId,
@@ -870,7 +876,7 @@ async function onPostClick(ev, btn, variant) {
     const started = Date.now();
     try { xlog('info', 'send-started', { requestId, tweetId: post.tweetId, variant: variant, translateTo: v.translateTo, mediaTypes: post.hasImage ? ['image'] : [] }); } catch {}
     const result = await chrome.runtime.sendMessage(
-      { type: 'SEND_POST', post, requestId, ...(v.translateTo ? { translateTo: v.translateTo } : {}) });
+      { type: 'SEND_POST', post, requestId, variant, nameTheAuthor: Boolean(v.nameTheAuthor), ...(v.translateTo ? { translateTo: v.translateTo } : {}) });
     try { xlog('info', 'response-received', { requestId, jobId: result && result.jobId, durationMs: Date.now() - started }); } catch {}
     const total = (result && result.sent ? result.sent.length : 0) + (result && result.failures ? result.failures.length : 0);
     const where = await channelName();
